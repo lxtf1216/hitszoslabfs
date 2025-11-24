@@ -384,12 +384,142 @@ void* newfs_init(struct fuse_conn_info * conn_info) {
  */
 void newfs_destroy(void* p) {
 	/* TODO: 在这里进行卸载 */
-	
+	if(!super.is_mounted) {
+        return NEWFS_ERROR_NONE;
+    }
+
+    newfs_sync_inode(super.root_dentry->inode);
+
+    struct newfs_super_d sb_d; 
+
+    sb_d.magic = NEWFS_MAGIC;
+    sb_d.blks_size = super.blks_size;
+    sb_d.blks_nums = super.blks_nums;
+    sb_d.sb_offset = super.sb_offset;
+    sb_d.sb_blks = super.sb_blks;
+    sb_d.ino_map_offset = super.ino_map_offset;
+    sb_d.ino_map_blks = super.ino_map_blks;
+    sb_d.data_map_offset = super.data_map_offset;
+    sb_d.data_map_blks = super.data_map_blks;
+    sb_d.ino_offset = super.ino_offset;
+    sb_d.ino_blks = super.ino_blks;
+    sb_d.data_offset = super.data_offset;
+    sb_d.data_blks = super.data_blks;
+
+    //write sb_d
+
+    if(newfs_driver_write(NEWFS_SUPER_OFS, (uint8_t*)&sb_d, sizeof(struct newfs_super_d)) < NEWFS_ERROR_NONE) {
+        perror("Failed to write superblock");
+        return;
+    }
+
+    //write 2 maps
+
+    if(newfs_driver_write(super.ino_map_offset*super.blks_size, (uint8_t*)super.ino_map, BLKS_SZ(super.ino_map_blks)) < NEWFS_ERROR_NONE) {
+        perror("Failed to write inode bitmap");
+        return;
+    }
+
+    if(newfs_driver_write(super.data_map_offset*super.blks_size, (uint8_t*)super.data_map, BLKS_SZ(super.data_map_blks)) < NEWFS_ERROR_NONE) {
+        perror("Failed to write data bitmap");
+        return;	
+    }
+
+    free(super.ino_map);
+    free(super.data_map);
+
 	ddriver_close(super.fd);
 
 	return;
 }
+int newfs_calc_lvl(const char * path) {
+    // char* path_cpy = (char *)malloc(strlen(path));
+    // strcpy(path_cpy, path);
+    char* str = path;
+    int   lvl = 0;
+    if (strcmp(path, "/") == 0) {
+        return lvl;
+    }
+    while (*str != NULL) {
+        if (*str == '/') {
+            lvl++;
+        }
+        str++;
+    }
+    return lvl;
+}
+struct newfs_dentry* sfs_lookup(const char * path, bool* is_find, bool* is_root) {
+    struct newfs_dentry* dentry_cursor = super.root_dentry;
+    struct newfs_dentry* dentry_ret = NULL;
+    struct newfs_inode*  inode; 
+    int   total_lvl = newfs_calc_lvl(path);
+    int   lvl = 0;
+    bool is_hit;
+    char* fname = NULL;
+    char* path_cpy = (char*)malloc(sizeof(path));
+    *is_root = FALSE;
+    strcpy(path_cpy, path);
 
+    if (total_lvl == 0) {                           /* 根目录 */
+        *is_find = TRUE;
+        *is_root = TRUE;
+        dentry_ret = super.root_dentry;
+    }
+    fname = strtok(path_cpy, "/");       
+    while (fname)
+    {   
+        lvl++;
+        if (dentry_cursor->inode == NULL) {           /* Cache机制 */
+            newfs_read_inode(dentry_cursor, dentry_cursor->ino);
+        }
+
+        inode = dentry_cursor->inode;
+
+        if (IS_REG(inode) && lvl < total_lvl) {
+            perror(" not a dir\n");
+            dentry_ret = inode->dentry;
+            break;
+        }
+        if (IS_DIR(inode)) {
+            dentry_cursor = inode->dentrys;
+            is_hit        = FALSE;
+
+            while (dentry_cursor)   /* 遍历子目录项 */
+            {
+                if (strcmp(fname, dentry_cursor->name) == 0) {
+                    is_hit = TRUE;
+                    break;
+                }
+                dentry_cursor = dentry_cursor->brother;
+            }
+            
+            if (!is_hit) {
+                *is_find = FALSE;
+                perror(" not found\n");
+                dentry_ret = inode->dentry;
+                break;
+            }
+
+            if (is_hit && lvl == total_lvl) {
+                *is_find = TRUE;
+                dentry_ret = dentry_cursor;
+                break;
+            }
+        }
+        fname = strtok(NULL, "/"); 
+    }
+
+    if (dentry_ret->inode == NULL) {
+        dentry_ret->inode = newfs_read_inode(dentry_ret, dentry_ret->ino);
+    }
+    
+    return dentry_ret;
+}
+char* newfs_get_fname(const char* path) {
+    char ch = '/';
+    char *q = strrchr(path, ch) + 1;
+    return q;
+}
 /**
  * @brief 创建目录
  * 
@@ -399,7 +529,24 @@ void newfs_destroy(void* p) {
  */
 int newfs_mkdir(const char* path, mode_t mode) {
 	/* TODO: 解析路径，创建目录 */
-	return 0;
+    bool is_find = FALSE,is_root = FALSE;
+    char* fname;
+    struct newfs_dentry* parent_dentry = newfs_path_lookup(path, &is_find, &is_root);
+    struct newfs_dentry* new_dentry;
+    struct newfs_inode*  inode;  
+    if(is_find) {
+        return -NEWFS_ERROR_EXISTS;
+    }
+    if(IS_REG(parent_dentry->inode)) {
+        return -NEWFS_ERROR_UNSUPPORTED;
+    }
+
+    fname = newfs_get_fname(path);
+    new_dentry = newfs_dentry(fname, DIR);
+    new_dentry->parent = parent_dentry;
+    inode = newfs_alloc_inode(new_dentry);
+    insert_dentry_to_inode(parent_dentry->inode, new_dentry);
+	return NEWFS_ERROR_NONE;
 }
 
 /**
@@ -448,7 +595,29 @@ int newfs_readdir(const char * path, void * buf, fuse_fill_dir_t filler, off_t o
  */
 int newfs_mknod(const char* path, mode_t mode, dev_t dev) {
 	/* TODO: 解析路径，并创建相应的文件 */
-	return 0;
+    bool is_find = FALSE,is_root = FALSE;
+
+    struct newfs_dentry* parent_dentry = newfs_path_lookup(path, &is_find, &is_root);
+    struct newfs_dentry* new_dentry;
+    struct newfs_inode*  inode;
+    char* fname;
+
+    if(is_find) {
+        return -NEWFS_ERROR_EXISTS;
+    }
+
+    fname = newfs_get_fname(path);
+    if(S_ISREG(mode)) {
+        new_dentry = newfs_dentry(fname, FILE);
+    } else if(S_ISDIR(mode)) {
+        new_dentry = newfs_dentry(fname,DIR);
+    }
+
+    new_dentry->parent = parent_dentry;
+    inode = newfs_alloc_inode(new_dentry);
+    insert_dentry_to_inode(parent_dentry->inode, new_dentry);
+
+	return NEWFS_ERROR_NONE;
 }
 
 /**
