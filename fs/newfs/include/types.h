@@ -38,6 +38,8 @@ typedef int                 bool;
 #define NEWFS_FLAG_BUF_DIRTY      0x1
 #define NEWFS_FLAG_BUF_OCCUPY     0x2
 
+#define NEWFS_MAX_BLK_PER_FILE    6
+#define NEWFS_INODE_NUM 585
 //macro funcs
 #define IO_SZ()                     512
 #define BLK_SZ()                    1024
@@ -50,12 +52,14 @@ typedef int                 bool;
 #define BLKS_SZ(blks)               ((blks) * BLK_SZ())
 #define ASSIGN_FNAME(psfs_dentry, _fname)\ 
                                         memcpy(psfs_dentry->fname, _fname, strlen(_fname))
-#define INO_OFS(ino)                (super.ino_offset + (ino) * sizeof(struct newfs_inode_d))
-//#define DATA_OFS(ino)               (INO_OFS(ino) + BLKS_SZ(SFS_INODE_PER_FILE))
+#define INO_OFS(ino)                ((super.ino_offset+(ino))*super.blks_size)
+#define DATA_OFS(blk_id,off)               ((super.data_offset + blk_id)*super.blks_size + off)
 
 #define IS_DIR(pinode)              (pinode->dentry->ftype == DIR)
 #define IS_REG(pinode)              (pinode->dentry->ftype == FILE)
 #define IS_SYM_LINK(pinode)         (pinode->dentry->ftype == SFS_SYM_LINK)
+
+#define MIN(a,b)                    ((a)<(b)?(a):(b))
 typedef enum {
     FILE,
     DIR
@@ -98,20 +102,18 @@ struct newfs_super {
 struct newfs_inode {
     uint32_t ino;
     /* TODO: Define yourself */
-
-    int ino ;
-
     int size;
-    int link;
 
     FILE_TYPE ftype;
 
-    int block_ptr[6];
+    int block_ptr[NEWFS_MAX_BLK_PER_FILE];
 
     int dir_cnt;
 
     struct newfs_dentry* dentry;
     struct newfs_dentrys* dentrys;
+
+    char* data;
 };
 
 struct newfs_dentry {
@@ -157,18 +159,14 @@ struct newfs_inode_d {
     uint32_t ino;
     /* TODO: Define yourself */
 
-    int ino ;
-
     int size;
-    int link;
 
     FILE_TYPE ftype;
 
-    int block_ptr[6];
+    int block_ptr[NEWFS_MAX_BLK_PER_FILE];
 
     int dir_cnt;
 
-    struct newfs_dentry* dentry;
 };
 struct newfs_dentry_d {
     char     name[MAX_NAME_LEN];

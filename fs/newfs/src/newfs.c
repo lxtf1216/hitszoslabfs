@@ -63,7 +63,35 @@ int newfs_driver_read(int offset, uint8_t *out_content, int size) {
     free(temp_content);
     return NEWFS_ERROR_NONE;
 }
+//allocate datablk
+int newfs_alloc_datablk() {
+    int byte_cursor = 0; 
+    int bit_cursor  = 0; 
+    int blk_cursor  = 0;
+    bool is_find_free_entry = FALSE;
+    /* 检查位图是否有空位 */
+    for (byte_cursor = 0; byte_cursor < BLKS_SZ(super.data_map_blks); 
+         byte_cursor++)
+    {
+        for (bit_cursor = 0; bit_cursor < UINT8_BITS; bit_cursor++) {
+            if(((int)(super.data_map[byte_cursor]) & (0x1 << bit_cursor)) == 0) {    
+                                                      /* 当前blk_cursor位置空闲 */
+                super.data_map[byte_cursor] |= (0x1 << bit_cursor);
+                is_find_free_entry = TRUE;           
+                break;
+            }
+            blk_cursor++;
+        }
+        if (is_find_free_entry) {
+            break;
+        }
+    }
 
+    if (!is_find_free_entry  )
+        return -NEWFS_ERROR_NOSPACE;
+
+    return blk_cursor;
+}
 //allocate inode
 struct newfs_inode* newfs_alloc_inode(struct newfs_dentry * dentry) {
     struct newfs_inode* inode;
@@ -104,9 +132,8 @@ struct newfs_inode* newfs_alloc_inode(struct newfs_dentry * dentry) {
     inode->dir_cnt = 0;
     //inode->dentrys = NULL;
     
-	//TODO : modify it to alloc data blocks
-    for(int i=0;i<6;++i) {
-		inode->block_ptr[i] = malloc(BLKS_SZ(1));
+    for(int i=0;i<NEWFS_MAX_BLK_PER_FILE;++i) {
+		inode->block_ptr[i] = -1;
 	}
 
     return inode;
@@ -139,7 +166,7 @@ int newfs_sync_inode(struct newfs_inode * inode) {
     struct newfs_inode_d  inode_d;
     struct newfs_dentry*  dentry_cursor;
     struct newfs_dentry_d dentry_d;
-    int ino             = inode->ino;
+    uint32_t ino        = inode->ino;
     inode_d.ino         = ino;
     inode_d.size        = inode->size;
     //memcpy(inode_d.target_path, inode->target_path, SFS_MAX_FILE_NAME);
@@ -147,7 +174,7 @@ int newfs_sync_inode(struct newfs_inode * inode) {
     inode_d.dir_cnt     = inode->dir_cnt;
     int offset;
     /* 先写inode本身 */
-    if (newfs_driver_write(SFS_INO_OFS(ino), (uint8_t *)&inode_d, 
+    if (newfs_driver_write(INO_OFS(ino), (uint8_t *)&inode_d, 
                      sizeof(struct newfs_inode_d)) != NEWFS_ERROR_NONE) {
         return -NEWFS_ERROR_IO;
     }
@@ -155,13 +182,14 @@ int newfs_sync_inode(struct newfs_inode * inode) {
     /* 再写inode下方的数据 */
     if (IS_DIR(inode)) { /* 如果当前inode是目录，那么数据是目录项，且目录项的inode也要写回 */                          
         dentry_cursor = inode->dentrys;
-        offset        = DATA_OFS(ino);
+        int blk_id    = 0;
+        offset        = 0;
         while (dentry_cursor != NULL)
         {
             memcpy(dentry_d.name, dentry_cursor->name, MAX_NAME_LEN);
             dentry_d.ftype = dentry_cursor->ftype;
             dentry_d.ino = dentry_cursor->ino;
-            if (newfs_driver_write(offset, (uint8_t *)&dentry_d, 
+            if (newfs_driver_write(DATA_OFS(inode->block_ptr[blk_id],offset), (uint8_t *)&dentry_d, 
                                  sizeof(struct newfs_dentry_d)) != NEWFS_ERROR_NONE) {
                 return -NEWFS_ERROR_IO;                     
             }
@@ -172,15 +200,21 @@ int newfs_sync_inode(struct newfs_inode * inode) {
 
             dentry_cursor = dentry_cursor->brother;
             offset += sizeof(struct newfs_dentry_d);
+            if(offset >= super.blks_size) {
+                offset = 0;
+                blk_id++;
+            }
         }
     }
     else if (IS_REG(inode)) { /* 如果当前inode是文件，那么数据是文件内容，直接写即可 */
-        // if (newfs_driver_write(DATA_OFS(ino), inode->data, 
-        //                       BLKS_SZ(NEWFS_DATA_PER_FILE)) != NEWFS_ERROR_NONE) {
-        //     NEWFS_DBG("[%s] io error\n", __func__);
-        //     return -NEWFS_ERROR_IO;
-        // }
-		//TODO : write inode data
+        int now_siz = 0;
+        while(now_siz < inode->size) {
+            int write_size = MIN(inode->size - now_siz, BLK_SZ());
+            if (newfs_driver_write(DATA_OFS(inode->block_ptr[now_siz/BLK_SZ()], now_siz), inode->data + now_siz, write_size) != NEWFS_ERROR_NONE) {
+                return -NEWFS_ERROR_IO;
+            }
+            now_siz += write_size;
+        }
     }
     return NEWFS_ERROR_NONE;
 }
@@ -243,7 +277,7 @@ void* newfs_init(struct fuse_conn_info * conn_info) {
 
 	super.is_mounted = FALSE;
 	bool init = FALSE;
-	/* 下面是一个控制设备的示例 */
+
 	int driver_fd = ddriver_open(newfs_options.device);
 	if(driver_fd < 0) {
 		perror("Failed to open device");
@@ -273,7 +307,7 @@ void* newfs_init(struct fuse_conn_info * conn_info) {
         sb_d.data_map_blks = 1;
 
         sb_d.ino_offset = sb_d.data_map_offset + sb_d.data_map_blks;
-        sb_d.ino_blks = 29;
+        sb_d.ino_blks = NEWFS_INODE_NUM;
 
         sb_d.data_offset = sb_d.ino_offset + sb_d.ino_blks;
         sb_d.data_blks = sb_d.blks_nums - (sb_d.sb_blks + sb_d.ino_map_blks + sb_d.data_map_blks + sb_d.ino_blks);
@@ -295,9 +329,11 @@ void* newfs_init(struct fuse_conn_info * conn_info) {
 	super.data_offset = sb_d.data_offset;
 	super.data_blks = sb_d.data_blks;
 
+    //init 2 maps
 	super.ino_map = malloc(BLKS_SZ(sb_d.ino_map_blks));
 	super.data_map = malloc(BLKS_SZ(sb_d.data_map_blks));
 
+    // if not init ,read from disk
 	if(!init) {
 		if(newfs_driver_read(sb_d.ino_map_offset*sb_d.blks_size, (uint8_t*)super.ino_map, BLKS_SZ(sb_d.ino_map_blks)) < NEWFS_ERROR_NONE) {
 			perror("Failed to read inode bitmap");
