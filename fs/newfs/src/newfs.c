@@ -210,13 +210,25 @@ int newfs_sync_inode(struct newfs_inode * inode) {
         int now_siz = 0;
         while(now_siz < inode->size) {
             int write_size = MIN(inode->size - now_siz, BLK_SZ());
-            if (newfs_driver_write(DATA_OFS(inode->block_ptr[now_siz/BLK_SZ()], now_siz), inode->data + now_siz, write_size) != NEWFS_ERROR_NONE) {
+            if (newfs_driver_write(DATA_OFS(inode->block_ptr[now_siz/BLK_SZ()], now_siz % BLK_SZ()), inode->data + now_siz, write_size) != NEWFS_ERROR_NONE) {
                 return -NEWFS_ERROR_IO;
             }
             now_siz += write_size;
         }
     }
     return NEWFS_ERROR_NONE;
+}
+//
+int insert_dentry_to_inode(struct newfs_inode* inode,struct newfs_dentry* dentry) {
+    if(inode->dentrys == NULL) {
+        inode->dentrys = dentry;
+    }else {
+        dentry->brother = inode->dentrys;
+        inode->dentrys = dentry;
+    }
+    inode->dir_cnt ++ ;
+    inode->size += sizeof(struct newfs_dentry_d);
+    return inode->dir_cnt;
 }
 // read inode from disk recursively
 struct newfs_inode* newfs_read_inode(struct newfs_dentry * dentry, int ino) {
@@ -239,10 +251,10 @@ struct newfs_inode* newfs_read_inode(struct newfs_dentry * dentry, int ino) {
     /* 内存中的inode的数据或子目录项部分也需要读出 */
     if (IS_DIR(inode)) {
         dir_cnt = inode_d.dir_cnt;
-		struct dentry
         for (i = 0; i < dir_cnt; i++)
         {
-            if (newfs_driver_read(DATA_OFS(ino) + i * sizeof(struct newfs_dentry_d), 
+            int blk_id = (i * sizeof(struct newfs_dentry_d)) / super.blks_size;
+            if (newfs_driver_read(DATA_OFS(inode->block_ptr[blk_id],i*sizeof(struct newfs_dentry_d)), 
                                 (uint8_t *)&dentry_d, 
                                 sizeof(struct newfs_dentry_d)) != NEWFS_ERROR_NONE) {
                 return NULL;
@@ -250,16 +262,19 @@ struct newfs_inode* newfs_read_inode(struct newfs_dentry * dentry, int ino) {
             sub_dentry = newfs_dentry(dentry_d.name, dentry_d.ftype);
             sub_dentry->parent = inode->dentry;
             sub_dentry->ino    = dentry_d.ino; 
-            newfs_alloc_dentry(inode, sub_dentry);
+            insert_dentry_to_inode(inode, sub_dentry);
         }
     }
     else if (IS_REG(inode)) {
-        // inode->data = (uint8_t *)malloc(NEWFS_BLKS_SZ(NEWFS_DATA_PER_FILE));
-        // if (newfs_driver_read(DATA_OFS(ino), (uint8_t *)inode->data, 
-        //                     NEWFS_BLKS_SZ(NEWFS_DATA_PER_FILE)) != NEWFS_ERROR_NONE) {
-        //     return NULL;                    
-        // }
-		//TODO : read inode data
+        inode->data = (char*)malloc(inode->size);
+        int now_siz = 0;
+        while(now_siz < inode->size) {
+            int read_size = MIN(inode->size - now_siz, BLK_SZ());
+            if (newfs_driver_read(DATA_OFS(inode->block_ptr[now_siz/BLK_SZ()], now_siz % BLK_SZ()), (uint8_t*)(inode->data + now_siz), read_size) != NEWFS_ERROR_NONE) {
+                return NULL;
+            }
+            now_siz += read_size;
+        }
     }
     return inode;
 }
