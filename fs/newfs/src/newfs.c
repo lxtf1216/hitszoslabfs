@@ -31,9 +31,9 @@ static struct fuse_operations operations = {
 	.read = newfs_read,								  	 /* 读文件 */
 	.utimens = newfs_utimens,				 /* 修改时间，忽略，避免touch报错 */
 	.truncate = newfs_truncate,						  		 /* 改变文件大小 */
-	.unlink = NULL,							  		 /* 删除文件 */
-	.rmdir	= NULL,							  		 /* 删除目录， rm -r */
-	.rename = NULL,							  		 /* 重命名，mv */
+	.unlink = newfs_unlink,							  		 /* 删除文件 */
+	.rmdir	= newfs_rmdir,							  		 /* 删除目录， rm -r */
+	.rename = newfs_rename,							  		 /* 重命名，mv */
 
 	.open = newfs_open,							
 	.opendir = newfs_opendir,
@@ -793,7 +793,98 @@ int newfs_read(const char* path, char* buf, size_t size, off_t offset,
 	return size;			   
 
 }
+int newfs_drop_dentry(struct newfs_inode * inode, struct newfs_dentry * dentry) {
+    bool is_find = FALSE;
+    struct newfs_dentry* dentry_cursor;
+    dentry_cursor = inode->dentrys;
+    
+    if (dentry_cursor == dentry) {
+        inode->dentrys = dentry->brother;
+        is_find = TRUE;
+    }
+    else {
+        while (dentry_cursor)
+        {
+            if (dentry_cursor->brother == dentry) {
+                dentry_cursor->brother = dentry->brother;
+                is_find = TRUE;
+                break;
+            }
+            dentry_cursor = dentry_cursor->brother;
+        }
+    }
+    if (!is_find) {
+        return -NEWFS_ERROR_NOTFOUND;
+    }
+    inode->dir_cnt--;
+    inode->size -= sizeof(struct newfs_dentry_d);
+    return inode->dir_cnt;
+}
+int newfs_drop_inode(struct newfs_inode* inode) {
+    struct newfs_dentry*  dentry_cursor;
+    struct newfs_dentry*  dentry_to_free;
+    struct newfs_inode*   inode_cursor;
 
+    int byte_cursor = 0; 
+    int bit_cursor  = 0; 
+    int ino_cursor  = 0;
+    bool is_find = FALSE;
+
+    if (inode == super.root_dentry->inode) {
+        return NEWFS_ERROR_INVAL;
+    }
+
+    if (IS_DIR(inode)) {
+        dentry_cursor = inode->dentrys;
+                                                      /* 递归向下drop */
+        while (dentry_cursor)
+        {   
+            inode_cursor = dentry_cursor->inode;
+            newfs_drop_inode(inode_cursor);
+            newfs_drop_dentry(inode, dentry_cursor);
+            dentry_to_free = dentry_cursor;
+            dentry_cursor = dentry_cursor->brother;
+            free(dentry_to_free);
+        }
+
+        for (byte_cursor = 0; byte_cursor < BLK_SZ(); 
+            byte_cursor++)                            /* 调整inodemap */
+        {
+            for (bit_cursor = 0; bit_cursor < UINT8_BITS; bit_cursor++) {
+                if (ino_cursor == inode->ino) {
+                     super.ino_map[byte_cursor] &= (uint8_t)(~(0x1 << bit_cursor));
+                     is_find = TRUE;
+                     break;
+                }
+                ino_cursor++;
+            }
+            if (is_find == TRUE) {
+                break;
+            }
+        }
+    }
+    else if (IS_REG(inode) ) {
+        for (byte_cursor = 0; byte_cursor < BLK_SZ(); 
+            byte_cursor++)                            /* 调整inodemap */
+        {
+            for (bit_cursor = 0; bit_cursor < UINT8_BITS; bit_cursor++) {
+                if (ino_cursor == inode->ino) {
+                     super.ino_map[byte_cursor] &= (uint8_t)(~(0x1 << bit_cursor));
+                     is_find = TRUE;
+                     break;
+                }
+                ino_cursor++;
+            }
+            if (is_find == TRUE) {
+                break;
+            }
+        }
+        if (inode->data)
+            free(inode->data);
+        free(inode);
+    }
+    return NEWFS_ERROR_NONE;
+}
 /**
  * @brief 删除文件
  * 
@@ -802,7 +893,19 @@ int newfs_read(const char* path, char* buf, size_t size, off_t offset,
  */
 int newfs_unlink(const char* path) {
 	/* 选做 */
-	return 0;
+    bool is_find = FALSE,is_root = FALSE;
+    struct newfs_dentry* dentry = newfs_lookup(path, &is_find, &is_root);
+	struct newfs_inode*  inode;
+
+	if (is_find == FALSE) {
+		return -NEWFS_ERROR_NOTFOUND;
+	}
+
+	inode = dentry->inode;
+
+	newfs_drop_inode(inode);
+	newfs_drop_dentry(dentry->parent->inode, dentry);
+	return NEWFS_ERROR_NONE;
 }
 
 /**
@@ -819,7 +922,7 @@ int newfs_unlink(const char* path) {
  */
 int newfs_rmdir(const char* path) {
 	/* 选做 */
-	return 0;
+	return newfs_unlink(path);
 }
 
 /**
@@ -831,7 +934,41 @@ int newfs_rmdir(const char* path) {
  */
 int newfs_rename(const char* from, const char* to) {
 	/* 选做 */
-	return 0;
+    int ret = NEWFS_ERROR_NONE;
+	bool is_find, is_root;
+	struct newfs_dentry* from_dentry = newfs_lookup(from, &is_find, &is_root);
+	struct newfs_inode*  from_inode;
+	struct newfs_dentry* to_dentry;
+	mode_t mode = 0;
+	if (is_find == FALSE) {
+		return -NEWFS_ERROR_NOTFOUND;
+	}
+
+	if (strcmp(from, to) == 0) {
+		return NEWFS_ERROR_NONE;
+	}
+
+	from_inode = from_dentry->inode;
+	
+	if (IS_DIR(from_inode)) {
+		mode = S_IFDIR;
+	}
+	else if (IS_REG(from_inode)) {
+		mode = S_IFREG;
+	}
+
+	ret = newfs_mknod(to, mode, NULL);
+	if (ret != NEWFS_ERROR_NONE) {					  /* 保证目的文件不存在 */
+		return ret;
+	}
+
+	to_dentry = newfs_lookup(to, &is_find, &is_root);
+	newfs_drop_inode(to_dentry->inode);				  /* 保证生成的inode被释放 */
+	to_dentry->ino = from_inode->ino;				  /* 指向新的inode */
+	to_dentry->inode = from_inode;
+
+	newfs_drop_dentry(from_dentry->parent->inode, from_dentry);
+	return ret;
 }
 
 /**
