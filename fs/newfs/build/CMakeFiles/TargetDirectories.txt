@@ -1,3 +1,0 @@
-/home/dministrator/mycode/user-land-filesystem/fs/newfs/build/CMakeFiles/newfs.dir
-/home/dministrator/mycode/user-land-filesystem/fs/newfs/build/CMakeFiles/edit_cache.dir
-/home/dministrator/mycode/user-land-filesystem/fs/newfs/build/CMakeFiles/rebuild_cache.dir
