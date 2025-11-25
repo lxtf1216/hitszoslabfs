@@ -27,17 +27,17 @@ static struct fuse_operations operations = {
 	.getattr = newfs_getattr,				 /* 获取文件属性，类似stat，必须完成 */
 	.readdir = newfs_readdir,				 /* 填充dentrys */
 	.mknod = newfs_mknod,					 /* 创建文件，touch相关 */
-	.write = NULL,								  	 /* 写入文件 */
-	.read = NULL,								  	 /* 读文件 */
+	.write = newfs_write,								  	 /* 写入文件 */
+	.read = newfs_read,								  	 /* 读文件 */
 	.utimens = newfs_utimens,				 /* 修改时间，忽略，避免touch报错 */
-	.truncate = NULL,						  		 /* 改变文件大小 */
+	.truncate = newfs_truncate,						  		 /* 改变文件大小 */
 	.unlink = NULL,							  		 /* 删除文件 */
 	.rmdir	= NULL,							  		 /* 删除目录， rm -r */
 	.rename = NULL,							  		 /* 重命名，mv */
 
-	.open = NULL,							
-	.opendir = NULL,
-	.access = NULL
+	.open = newfs_open,							
+	.opendir = newfs_opendir,
+	.access = newfs_access,
 };
 /******************************************************************************
 * SECTION: 必做函数实现
@@ -131,6 +131,7 @@ struct newfs_inode* newfs_alloc_inode(struct newfs_dentry * dentry) {
     
     inode->dir_cnt = 0;
     inode->dentrys = NULL;
+    inode->data = malloc(BLK_SZ()*NEWFS_MAX_BLK_PER_FILE);
     
     for(int i=0;i<NEWFS_MAX_BLK_PER_FILE;++i) {
 		inode->block_ptr[i] = -1;
@@ -237,7 +238,13 @@ int insert_dentry_to_inode(struct newfs_inode* inode,struct newfs_dentry* dentry
 }
 // read inode from disk recursively
 struct newfs_inode* newfs_read_inode(struct newfs_dentry * dentry, int ino) {
-    struct newfs_inode* inode = (struct newfs_inode*)malloc(sizeof(struct newfs_inode));
+    struct newfs_inode* inode = NULL;
+    if(dentry->inode == NULL) {
+        inode = (struct newfs_inode*)malloc(sizeof(struct newfs_inode));
+        dentry->inode = inode;
+    } else {
+        inode = dentry->inode;
+    }
     struct newfs_inode_d inode_d;
     struct newfs_dentry* sub_dentry;
     struct newfs_dentry_d dentry_d;
@@ -725,6 +732,27 @@ int newfs_utimens(const char* path, const struct timespec tv[2]) {
 int newfs_write(const char* path, const char* buf, size_t size, off_t offset,
 		        struct fuse_file_info* fi) {
 	/* 选做 */
+    bool is_find = FALSE,is_root = FALSE;
+    struct newfs_dentry* dentry = newfs_lookup(path, &is_find, &is_root);
+    struct newfs_inode* inode;
+
+    if(is_find == FALSE) {
+        return -NEWFS_ERROR_NOTFOUND;
+    }
+
+    inode = dentry->inode;
+
+    if(IS_DIR(inode)) {
+        return -NEWFS_ERROR_ISDIR;
+    }
+
+    if(inode->size < offset) {
+        return -NEWFS_ERROR_SEEK;
+    }
+
+    memcpy(inode->data + offset,buf,size);
+    inode->size = offset + size > inode->size ? offset + size : inode->size;
+    newfs_sync_inode(inode);
 	return size;
 }
 
@@ -741,7 +769,29 @@ int newfs_write(const char* path, const char* buf, size_t size, off_t offset,
 int newfs_read(const char* path, char* buf, size_t size, off_t offset,
 		       struct fuse_file_info* fi) {
 	/* 选做 */
+    
+    bool is_find = FALSE,is_root = FALSE;
+    struct newfs_dentry* dentry = newfs_lookup(path, &is_find, &is_root);
+    struct newfs_inode* inode;
+
+    if(is_find == FALSE) {
+        return -NEWFS_ERROR_NOTFOUND;
+    }
+
+    inode = dentry->inode;
+
+    if(IS_DIR(inode)) {
+        return -NEWFS_ERROR_ISDIR;
+    }
+
+    if(inode->size < offset) {
+        return -NEWFS_ERROR_SEEK;
+    }
+
+    newfs_read_inode(dentry,dentry->ino);
+    memcpy(buf,inode->data + offset,size);
 	return size;			   
+
 }
 
 /**
@@ -818,7 +868,23 @@ int newfs_opendir(const char* path, struct fuse_file_info* fi) {
  */
 int newfs_truncate(const char* path, off_t offset) {
 	/* 选做 */
-	return 0;
+    bool is_find = FALSE,is_root = FALSE;
+    struct newfs_dentry* dentry = newfs_lookup(path, &is_find, &is_root);
+    struct newfs_inode* inode;
+
+    if(is_find == FALSE) {
+        return -NEWFS_ERROR_NOTFOUND;
+    }
+
+    inode = dentry->inode;
+
+    if(IS_DIR(inode)) {
+        return -NEWFS_ERROR_ISDIR;
+    }
+
+    inode->size = offset;
+
+    return NEWFS_ERROR_NONE;
 }
 
 
@@ -836,7 +902,30 @@ int newfs_truncate(const char* path, off_t offset) {
  */
 int newfs_access(const char* path, int type) {
 	/* 选做: 解析路径，判断是否存在 */
-	return 0;
+    bool is_find = FALSE,is_root = FALSE;
+    bool can_accsess = FALSE;
+    struct newfs_dentry* dentry = newfs_lookup(path, &is_find, &is_root);
+    struct newfs_inode* inode;
+    switch (type)
+    {
+    case R_OK:
+        can_accsess = TRUE;
+        break;
+    case F_OK:
+        if(is_find) {
+            can_accsess = TRUE;
+        }
+        break;
+    case W_OK:
+        can_accsess = TRUE;
+        break;
+    case X_OK:
+        can_accsess = TRUE;
+        break;
+    default:
+        break;
+    }
+	return can_accsess ? NEWFS_ERROR_NONE : -NEWFS_ERROR_ACCESS;
 }	
 /******************************************************************************
 * SECTION: FUSE入口

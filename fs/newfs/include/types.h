@@ -133,6 +133,7 @@ static inline struct newfs_dentry* newfs_dentry(char *fname,FILE_TYPE ftype) {
     strncpy(dentry->name, fname, MAX_NAME_LEN);
     dentry->ftype = ftype;
     dentry->ino = -1;
+    dentry->inode = NULL;
     return dentry;
 }
 struct newfs_super_d {
