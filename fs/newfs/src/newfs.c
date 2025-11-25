@@ -130,7 +130,7 @@ struct newfs_inode* newfs_alloc_inode(struct newfs_dentry * dentry) {
     inode->dentry = dentry;
     
     inode->dir_cnt = 0;
-    //inode->dentrys = NULL;
+    inode->dentrys = NULL;
     
     for(int i=0;i<NEWFS_MAX_BLK_PER_FILE;++i) {
 		inode->block_ptr[i] = -1;
@@ -172,6 +172,7 @@ int newfs_sync_inode(struct newfs_inode * inode) {
     //memcpy(inode_d.target_path, inode->target_path, SFS_MAX_FILE_NAME);
     inode_d.ftype       = inode->dentry->ftype;
     inode_d.dir_cnt     = inode->dir_cnt;
+    memcpy(inode_d.block_ptr, inode->block_ptr, sizeof(inode->block_ptr));
     int offset;
     /* 先写inode本身 */
     if (newfs_driver_write(INO_OFS(ino), (uint8_t *)&inode_d, 
@@ -226,6 +227,10 @@ int insert_dentry_to_inode(struct newfs_inode* inode,struct newfs_dentry* dentry
         dentry->brother = inode->dentrys;
         inode->dentrys = dentry;
     }
+    int bid = inode->size /super.blks_size;
+    if(inode->block_ptr[bid] == -1) {
+        inode->block_ptr[bid] = newfs_alloc_datablk();
+    }
     inode->dir_cnt ++ ;
     inode->size += sizeof(struct newfs_dentry_d);
     return inode->dir_cnt;
@@ -242,12 +247,15 @@ struct newfs_inode* newfs_read_inode(struct newfs_dentry * dentry, int ino) {
                         sizeof(struct newfs_inode_d)) != NEWFS_ERROR_NONE) {
         return NULL;                    
     }
-    inode->dir_cnt = 0;
+    inode->dir_cnt = inode_d.dir_cnt;
     inode->ino = inode_d.ino;
     inode->size = inode_d.size;
     //memcpy(inode->target_path, inode_d.target_path, SFS_MAX_FILE_NAME);
     inode->dentry = dentry;
     inode->dentrys = NULL;
+    for(int i=0;i<NEWFS_MAX_BLK_PER_FILE;++i) {
+        inode->block_ptr[i] = inode_d.block_ptr[i];
+    }
     /* 内存中的inode的数据或子目录项部分也需要读出 */
     if (IS_DIR(inode)) {
         dir_cnt = inode_d.dir_cnt;
@@ -262,7 +270,13 @@ struct newfs_inode* newfs_read_inode(struct newfs_dentry * dentry, int ino) {
             sub_dentry = newfs_dentry(dentry_d.name, dentry_d.ftype);
             sub_dentry->parent = inode->dentry;
             sub_dentry->ino    = dentry_d.ino; 
-            insert_dentry_to_inode(inode, sub_dentry);
+            //insert_dentry_to_inode(inode, sub_dentry);
+            if(inode->dentrys == NULL) {
+                inode->dentrys = sub_dentry;
+            }else {
+                sub_dentry->brother = inode->dentrys;
+                inode->dentrys = sub_dentry;
+            }
         }
     }
     else if (IS_REG(inode)) {
@@ -348,7 +362,9 @@ void* newfs_init(struct fuse_conn_info * conn_info) {
     super.sz_usage = sb_d.sz_usage;
     //init 2 maps
 	super.ino_map = malloc(BLKS_SZ(sb_d.ino_map_blks));
+    memset(super.ino_map,0,BLKS_SZ(sb_d.ino_map_blks));
 	super.data_map = malloc(BLKS_SZ(sb_d.data_map_blks));
+    memset(super.data_map,0,BLKS_SZ(sb_d.data_map_blks));
 
     // if not init ,read from disk
 	if(!init) {
@@ -366,12 +382,12 @@ void* newfs_init(struct fuse_conn_info * conn_info) {
 	if(init) {
 		root_inode = newfs_alloc_inode(root_dentry);
 		newfs_sync_inode(root_inode);
-	}
+	} else {
+        //read root inode
+	    root_inode = newfs_read_inode(root_dentry,NEWFS_ROOT_INO);
+	    root_dentry->inode = root_inode;
+    }
 
-
-	//read root inode
-	root_inode = newfs_read_inode(root_dentry,NEWFS_ROOT_INO);
-	root_dentry->inode = root_inode;
 	super.root_dentry = root_dentry;
 	super.is_mounted = TRUE;
 
@@ -459,7 +475,8 @@ struct newfs_dentry* newfs_lookup(const char * path, bool* is_find, bool* is_roo
     int   lvl = 0;
     bool is_hit;
     char* fname = NULL;
-    char* path_cpy = (char*)malloc(sizeof(path));
+    //char* path_cpy = (char*)malloc(sizeof(path));
+    char* path_cpy = strdup(path);
     *is_root = FALSE;
     strcpy(path_cpy, path);
 
@@ -674,6 +691,8 @@ int newfs_mknod(const char* path, mode_t mode, dev_t dev) {
 
     new_dentry->parent = parent_dentry;
     inode = newfs_alloc_inode(new_dentry);
+    printf("parent ino:%d\n",parent_dentry->ino);
+    fprintf(stderr, "parent ino: %d\n", parent_dentry->ino);
     insert_dentry_to_inode(parent_dentry->inode, new_dentry);
 
 	return NEWFS_ERROR_NONE;
