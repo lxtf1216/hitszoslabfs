@@ -118,13 +118,13 @@ struct newfs_inode* newfs_alloc_inode(struct newfs_dentry * dentry) {
     }
 
     if (!is_find_free_entry  )
-        return -NEWFS_ERROR_NOSPACE;
+        return NULL;
 
     inode = (struct newfs_inode*)malloc(sizeof(struct newfs_inode));
     inode->ino  = ino_cursor; 
     inode->size = 0;
                                                       /* dentry指向inode */
-    dentry->ino = inode;
+    dentry->inode = inode;
     dentry->ino   = inode->ino;
                                                       /* inode指回dentry */
     inode->dentry = dentry;
@@ -194,8 +194,8 @@ int newfs_sync_inode(struct newfs_inode * inode) {
                 return -NEWFS_ERROR_IO;                     
             }
             
-            if (dentry_cursor->ino != NULL) {
-                newfs_sync_inode(dentry_cursor->ino);
+            if (dentry_cursor->inode != NULL) {
+                newfs_sync_inode(dentry_cursor->inode);
             }
 
             dentry_cursor = dentry_cursor->brother;
@@ -266,7 +266,7 @@ struct newfs_inode* newfs_read_inode(struct newfs_dentry * dentry, int ino) {
         }
     }
     else if (IS_REG(inode)) {
-        inode->data = (char*)malloc(inode->size);
+        inode->data = (uint8_t*)malloc(inode->size);
         int now_siz = 0;
         while(now_siz < inode->size) {
             int read_size = MIN(inode->size - now_siz, BLK_SZ());
@@ -327,6 +327,7 @@ void* newfs_init(struct fuse_conn_info * conn_info) {
         sb_d.data_offset = sb_d.ino_offset + sb_d.ino_blks;
         sb_d.data_blks = sb_d.blks_nums - (sb_d.sb_blks + sb_d.ino_map_blks + sb_d.data_map_blks + sb_d.ino_blks);
 
+        sb_d.sz_usage = 0;
 		init = TRUE;
     }
 
@@ -344,6 +345,7 @@ void* newfs_init(struct fuse_conn_info * conn_info) {
 	super.data_offset = sb_d.data_offset;
 	super.data_blks = sb_d.data_blks;
 
+    super.sz_usage = sb_d.sz_usage;
     //init 2 maps
 	super.ino_map = malloc(BLKS_SZ(sb_d.ino_map_blks));
 	super.data_map = malloc(BLKS_SZ(sb_d.data_map_blks));
@@ -385,7 +387,7 @@ void* newfs_init(struct fuse_conn_info * conn_info) {
 void newfs_destroy(void* p) {
 	/* TODO: 在这里进行卸载 */
 	if(!super.is_mounted) {
-        return NEWFS_ERROR_NONE;
+        return ;
     }
 
     newfs_sync_inode(super.root_dentry->inode);
@@ -405,6 +407,7 @@ void newfs_destroy(void* p) {
     sb_d.ino_blks = super.ino_blks;
     sb_d.data_offset = super.data_offset;
     sb_d.data_blks = super.data_blks;
+    sb_d.sz_usage = super.sz_usage;
 
     //write sb_d
 
@@ -448,7 +451,7 @@ int newfs_calc_lvl(const char * path) {
     }
     return lvl;
 }
-struct newfs_dentry* sfs_lookup(const char * path, bool* is_find, bool* is_root) {
+struct newfs_dentry* newfs_lookup(const char * path, bool* is_find, bool* is_root) {
     struct newfs_dentry* dentry_cursor = super.root_dentry;
     struct newfs_dentry* dentry_ret = NULL;
     struct newfs_inode*  inode; 
@@ -531,7 +534,7 @@ int newfs_mkdir(const char* path, mode_t mode) {
 	/* TODO: 解析路径，创建目录 */
     bool is_find = FALSE,is_root = FALSE;
     char* fname;
-    struct newfs_dentry* parent_dentry = newfs_path_lookup(path, &is_find, &is_root);
+    struct newfs_dentry* parent_dentry = newfs_lookup(path, &is_find, &is_root);
     struct newfs_dentry* new_dentry;
     struct newfs_inode*  inode;  
     if(is_find) {
@@ -558,9 +561,49 @@ int newfs_mkdir(const char* path, mode_t mode) {
  */
 int newfs_getattr(const char* path, struct stat * newfs_stat) {
 	/* TODO: 解析路径，获取Inode，填充newfs_stat，可参考/fs/simplefs/sfs.c的sfs_getattr()函数实现 */
+    bool is_find = FALSE,is_root = FALSE;
+    struct newfs_dentry* dentry = newfs_lookup(path, &is_find, &is_root);
+
+    if(!is_find) {
+        return -NEWFS_ERROR_NOTFOUND;
+    }
+
+    struct newfs_inode* inode = dentry->inode;
+    if(IS_DIR(inode)) {
+        newfs_stat->st_mode = S_IFDIR | NEWFS_DEFAULT_PERM;
+        newfs_stat->st_size = inode->size;
+    } else if(IS_REG(inode)) {
+        newfs_stat->st_mode = S_IFREG | NEWFS_DEFAULT_PERM;
+        newfs_stat->st_size = inode->size;
+    }
+
+    newfs_stat->st_nlink = 1;
+    newfs_stat->st_uid   = getuid();
+    newfs_stat->st_gid   = getgid();
+    newfs_stat->st_atime = time(NULL);
+    newfs_stat->st_mtime = time(NULL);
+    newfs_stat->st_blksize = BLK_SZ();
+
+    if(is_root) {
+        newfs_stat->st_size = super.sz_usage;
+        newfs_stat->st_blocks = super.blks_nums;
+        newfs_stat->st_nlink = 2;
+    }
 	return 0;
 }
-
+struct newfs_dentry* newfs_get_dentry(struct newfs_inode * inode, int dir) {
+    struct newfs_dentry* dentry_cursor = inode->dentrys;
+    int    cnt = 0;
+    while (dentry_cursor)
+    {
+        if (dir == cnt) {
+            return dentry_cursor;
+        }
+        cnt++;
+        dentry_cursor = dentry_cursor->brother;
+    }
+    return NULL;
+}
 /**
  * @brief 遍历目录项，填充至buf，并交给FUSE输出
  * 
@@ -582,7 +625,23 @@ int newfs_getattr(const char* path, struct stat * newfs_stat) {
 int newfs_readdir(const char * path, void * buf, fuse_fill_dir_t filler, off_t offset,
 			    		 struct fuse_file_info * fi) {
     /* TODO: 解析路径，获取目录的Inode，并读取目录项，利用filler填充到buf，可参考/fs/simplefs/sfs.c的sfs_readdir()函数实现 */
-    return 0;
+    bool is_find = FALSE,is_root = FALSE;
+    int cur_dir = offset;
+
+    struct newfs_dentry* dentry = newfs_lookup(path, &is_find, &is_root);
+	struct newfs_dentry* sub_dentry;
+	struct newfs_inode* inode;
+
+    if(is_find) {
+        inode = dentry->inode;
+        sub_dentry = newfs_get_dentry(inode,cur_dir);
+        if(sub_dentry) {
+            filler(buf,sub_dentry->name,NULL,cur_dir+1);
+        }
+        return NEWFS_ERROR_NONE;
+    }
+
+    return -NEWFS_ERROR_NOTFOUND;
 }
 
 /**
@@ -597,7 +656,7 @@ int newfs_mknod(const char* path, mode_t mode, dev_t dev) {
 	/* TODO: 解析路径，并创建相应的文件 */
     bool is_find = FALSE,is_root = FALSE;
 
-    struct newfs_dentry* parent_dentry = newfs_path_lookup(path, &is_find, &is_root);
+    struct newfs_dentry* parent_dentry = newfs_lookup(path, &is_find, &is_root);
     struct newfs_dentry* new_dentry;
     struct newfs_inode*  inode;
     char* fname;
@@ -608,7 +667,7 @@ int newfs_mknod(const char* path, mode_t mode, dev_t dev) {
 
     fname = newfs_get_fname(path);
     if(S_ISREG(mode)) {
-        new_dentry = newfs_dentry(fname, FILE);
+        new_dentry = newfs_dentry(fname, REG);
     } else if(S_ISDIR(mode)) {
         new_dentry = newfs_dentry(fname,DIR);
     }
@@ -629,7 +688,7 @@ int newfs_mknod(const char* path, mode_t mode, dev_t dev) {
  */
 int newfs_utimens(const char* path, const struct timespec tv[2]) {
 	(void)path;
-	return 0;
+	return NEWFS_ERROR_NONE;
 }
 /******************************************************************************
 * SECTION: 选做函数实现

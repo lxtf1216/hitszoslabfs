@@ -50,18 +50,17 @@ typedef int                 bool;
 #define ROUND_UP(value, round)      ((value) % (round) == 0 ? (value) : ((value) / (round) + 1) * (round))
 
 #define BLKS_SZ(blks)               ((blks) * BLK_SZ())
-#define ASSIGN_FNAME(psfs_dentry, _fname)\ 
-                                        memcpy(psfs_dentry->fname, _fname, strlen(_fname))
+
 #define INO_OFS(ino)                ((super.ino_offset+(ino))*super.blks_size)
 #define DATA_OFS(blk_id,off)               ((super.data_offset + blk_id)*super.blks_size + off)
 
 #define IS_DIR(pinode)              (pinode->dentry->ftype == DIR)
-#define IS_REG(pinode)              (pinode->dentry->ftype == FILE)
-#define IS_SYM_LINK(pinode)         (pinode->dentry->ftype == SFS_SYM_LINK)
+#define IS_REG(pinode)              (pinode->dentry->ftype == REG)
+//#define IS_SYM_LINK(pinode)         (pinode->dentry->ftype == SFS_SYM_LINK)
 
 #define MIN(a,b)                    ((a)<(b)?(a):(b))
 typedef enum {
-    FILE,
+    REG,
     DIR
 }FILE_TYPE;
 
@@ -81,11 +80,11 @@ struct newfs_super {
     int sb_offset;
     int sb_blks;
 
-    char* ino_map;
+    uint8_t* ino_map;
     int ino_map_offset;
     int ino_map_blks;
 
-    char* data_map;
+    uint8_t* data_map;
     int data_map_offset;
     int data_map_blks;
 
@@ -96,6 +95,8 @@ struct newfs_super {
     int data_blks;
 
     struct newfs_dentry* root_dentry;
+
+    int sz_usage;
 
 };
 // 8*4B = 32B 1024/32*29 = 928 >> 
@@ -111,9 +112,9 @@ struct newfs_inode {
     int dir_cnt;
 
     struct newfs_dentry* dentry;
-    struct newfs_dentrys* dentrys;
+    struct newfs_dentry* dentrys;
 
-    char* data;
+    uint8_t* data;
 };
 
 struct newfs_dentry {
@@ -154,6 +155,8 @@ struct newfs_super_d {
 
     int data_offset;
     int data_blks;
+
+    int sz_usage;
 };
 struct newfs_inode_d {
     uint32_t ino;
