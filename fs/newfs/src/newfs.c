@@ -698,8 +698,7 @@ int newfs_mknod(const char* path, mode_t mode, dev_t dev) {
 
     new_dentry->parent = parent_dentry;
     inode = newfs_alloc_inode(new_dentry);
-    printf("parent ino:%d\n",parent_dentry->ino);
-    fprintf(stderr, "parent ino: %d\n", parent_dentry->ino);
+
     insert_dentry_to_inode(parent_dentry->inode, new_dentry);
 
 	return NEWFS_ERROR_NONE;
